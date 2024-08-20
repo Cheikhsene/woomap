@@ -22,7 +22,7 @@ Ce projet est une application web qui affiche une carte interactive des commande
 
 1. **Cloner le dépôt**
    ```
-   git clone https://github.com/votre-nom-utilisateur/woocommerce-senegal-map.git
+   git clone https://github.com/Cheikhsene/woomap.git
    ```
 
 2. **Configurer les clés API**
