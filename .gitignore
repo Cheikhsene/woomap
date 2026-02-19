@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Runtime data
+data/cache/*
+data/geocode/*
+data/stores/*
+!data/cache/.gitkeep
+!data/geocode/.gitkeep
+!data/stores/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PHP
+vendor/
+composer.lock

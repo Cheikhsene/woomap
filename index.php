@@ -1,246 +1,477 @@
 <?php
-// Configuration
-define('WOOCOMMERCE_STORE_URL', 'https://votre-site-woocommerce.com/');
-define('WOOCOMMERCE_CONSUMER_KEY', 'votre_cle_consommateur_woocommerce');
-define('WOOCOMMERCE_CONSUMER_SECRET', 'votre_cle_secrete_woocommerce');
-define('GOOGLE_MAPS_API_KEY', 'votre_cle_api_google_maps');
+/**
+ * WooMap - Entry Point & Router
+ * Routes all requests to appropriate handlers.
+ *
+ * @version 2.0.0
+ * @license MIT
+ */
 
-// Fonction pour récupérer les commandes 
-function obtenirToutesLesCommandesWooCommerce() {
-    $page = 1;
-    $per_page = 100;
-    $toutes_les_commandes = [];
+define('WOOMAP', true);
 
-    while (true) {
-        $url = WOOCOMMERCE_STORE_URL . "wp-json/wc/v3/orders?page=$page&per_page=$per_page";
-        $auth = base64_encode(WOOCOMMERCE_CONSUMER_KEY . ':' . WOOCOMMERCE_CONSUMER_SECRET);
+// Load configuration
+require_once __DIR__ . '/config.php';
 
-        $reponse = file_get_contents($url, false, stream_context_create([
-            'http' => [
-                'method' => 'GET',
-                'header' => "Authorization: Basic " . $auth . "\r\n"
-            ]
-        ]));
-
-        if ($reponse === FALSE) {
-            break;
-        }
-
-        $commandes = json_decode($reponse);
-
-        if (empty($commandes)) {
-            break;
-        }
-
-        $toutes_les_commandes = array_merge($toutes_les_commandes, $commandes);
-        $page++;
-    }
-
-    return $toutes_les_commandes;
+// Autoload source files
+foreach (glob(SRC_DIR . '/*.php') as $file) {
+    require_once $file;
 }
 
-// Pour traiter les données des commandes
-function traiterDonneesCommandes() {
-    $commandes = obtenirToutesLesCommandesWooCommerce();
-    $emplacements = [];
-    $statistiques = [
-        'termine' => 0,
-        'en_cours' => 0,
-        'annule' => 0,
-        'autre' => 0,
-        'total_ventes' => 0
-    ];
+// Start session
+Session::start();
 
-    foreach ($commandes as $commande) {
-        $adresse = $commande->billing->address_1 . ', ' . $commande->billing->city . ', Sénégal';
-        $statut = $commande->status;
-        $montant = $commande->total;
+// ==================
+// Router
+// ==================
 
-        // Mise à jour des statistiques
-        switch ($statut) {
-            case 'completed':
-                $statistiques['termine']++;
-                $statistiques['total_ventes'] += floatval($montant);
-                break;
-            case 'processing':
-                $statistiques['en_cours']++;
-                break;
-            case 'cancelled':
-                $statistiques['annule']++;
-                break;
-            default:
-                $statistiques['autre']++;
-        }
+$route = $_GET['route'] ?? '';
+$route = '/' . trim($route, '/');
+$method = $_SERVER['REQUEST_METHOD'];
 
-        $emplacements[] = [
-            'adresse' => $adresse,
-            'statut' => $statut,
-            'date' => $commande->date_created,
-            'id_commande' => $commande->id,
-            'montant' => $montant
-        ];
+// Public routes (no auth required)
+$publicRoutes = ['/login', '/oauth/start', '/oauth/callback'];
+
+// Check authentication for protected routes
+if (!in_array($route, $publicRoutes) && !Auth::check()) {
+    if (isAjax()) {
+        jsonResponse(['success' => false, 'error' => 'Non authentifié'], 401);
     }
-
-    return ['emplacements' => $emplacements, 'statistiques' => $statistiques];
+    redirect('/login');
 }
 
-$donnees_commandes = traiterDonneesCommandes();
-?>
+// Route handling
+switch ($route) {
+    // ==================
+    // Auth Routes
+    // ==================
 
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Carte Clients Sénégal</title>
-    <script src="https://maps.googleapis.com/maps/api/js?key=<?php echo GOOGLE_MAPS_API_KEY; ?>&libraries=places"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <style>
-        #map { height: 600px; }
-        .stats-box {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    case '/login':
+        if ($method === 'POST') {
+            handleLogin();
+        } else {
+            if (Auth::check()) {
+                redirect('/dashboard');
+            }
+            renderTemplate('login');
         }
-    </style>
-</head>
-<body class="bg-gray-100">
-    <div class="container mx-auto p-4">
-        <h1 class="text-2xl font-bold mb-4">Carte Clients Sénégal</h1>
-        
-        <div class="mb-4 flex space-x-4 items-center">
-            <button id="filtre-tous" class="p-2 bg-blue-500 text-white rounded">
-                <i class="fas fa-globe"></i> Tous
-            </button>
-            <button id="filtre-termine" class="p-2 bg-green-500 text-white rounded">
-                <i class="fas fa-check-circle"></i> Terminé
-            </button>
-            <button id="filtre-en-cours" class="p-2 bg-yellow-500 text-white rounded">
-                <i class="fas fa-clock"></i> En cours
-            </button>
-            <button id="filtre-annule" class="p-2 bg-red-500 text-white rounded">
-                <i class="fas fa-times-circle"></i> Annulé
-            </button>
-            <div>
-                <label for="date-debut" class="mr-2">Du:</label>
-                <input type="date" id="date-debut" class="p-2 border rounded">
-            </div>
-            <div>
-                <label for="date-fin" class="mr-2">Au:</label>
-                <input type="date" id="date-fin" class="p-2 border rounded">
-            </div>
-            <button id="appliquer-filtres" class="p-2 bg-purple-500 text-white rounded">
-                <i class="fas fa-filter"></i> Appliquer les filtres
-            </button>
-        </div>
+        break;
 
-        <div id="map" class="w-full bg-white shadow-lg rounded-lg"></div>
+    case '/oauth/start':
+        handleOAuthStart();
+        break;
 
-        <div class="stats-box">
-            <h2 class="text-lg font-bold mb-2">Statistiques</h2>
-            <canvas id="statut-chart" width="200" height="200"></canvas>
-            <p class="mt-2">Total des ventes terminées: <span id="total-ventes"></span> FCFA</p>
-        </div>
-    </div>
+    case '/oauth/callback':
+        handleOAuthCallback();
+        break;
 
-    <script>
-    const donneesCommandes = <?php echo json_encode($donnees_commandes['emplacements']); ?>;
-    const statistiques = <?php echo json_encode($donnees_commandes['statistiques']); ?>;
-    let carte;
-    let marqueurs = [];
+    case '/logout':
+        Auth::logout();
+        redirect('/login');
+        break;
 
-    function initialiserCarte() {
-        carte = new google.maps.Map(document.getElementById('map'), {
-            center: {lat: 14.6937, lng: -17.4441}, // Centre du Sénégal
-            zoom: 7
-        });
+    // ==================
+    // Dashboard
+    // ==================
 
-        const geocoder = new google.maps.Geocoder();
-        
-        donneesCommandes.forEach(commande => {
-            geocoder.geocode({ address: commande.adresse }, (resultats, statut) => {
-                if (statut === 'OK' && resultats[0]) {
-                    const marqueur = new google.maps.Marker({
-                        map: carte,
-                        position: resultats[0].geometry.location,
-                        title: commande.adresse
-                    });
+    case '/':
+    case '/dashboard':
+        renderPage('dashboard', 'Carte des commandes', 'dashboard');
+        break;
 
-                    const infoWindow = new google.maps.InfoWindow({
-                        content: `<h3>Commande: ${commande.id_commande}</h3><p>Adresse: ${commande.adresse}</p><p>Statut: ${commande.statut}</p><p>Date: ${commande.date}</p><p>Montant: ${commande.montant} FCFA</p>`
-                    });
+    // ==================
+    // Analytics
+    // ==================
 
-                    marqueur.addListener('click', () => {
-                        infoWindow.open(carte, marqueur);
-                    });
+    case '/analytics':
+        renderPage('analytics', 'Analytiques', 'analytics');
+        break;
 
-                    marqueurs.push({ marqueur, commande });
-                }
-            });
-        });
+    // ==================
+    // Store Management
+    // ==================
+
+    case '/stores':
+        renderPage('stores', 'Boutiques', 'stores');
+        break;
+
+    case '/stores/add':
+        handleStoreAdd();
+        break;
+
+    case '/stores/switch':
+        handleStoreSwitch();
+        break;
+
+    case '/stores/delete':
+        handleStoreDelete();
+        break;
+
+    // ==================
+    // API Endpoints
+    // ==================
+
+    case '/api/orders':
+        handleApiOrders();
+        break;
+
+    case '/api/geocode':
+        handleApiGeocode();
+        break;
+
+    case '/api/notifications':
+        handleApiNotifications();
+        break;
+
+    case '/api/clear-cache':
+        handleApiClearCache();
+        break;
+
+    // ==================
+    // Export
+    // ==================
+
+    case '/export/csv':
+        handleExportCSV();
+        break;
+
+    case '/export/print':
+        handleExportPrint();
+        break;
+
+    // ==================
+    // 404
+    // ==================
+
+    default:
+        http_response_code(404);
+        echo '<!DOCTYPE html><html><head><title>404</title><link rel="stylesheet" href="/public/css/app.css"></head>';
+        echo '<body><div class="login-page"><div style="text-align:center;color:white;">';
+        echo '<h1 style="font-size:72px;margin-bottom:16px;">404</h1>';
+        echo '<p style="font-size:18px;opacity:0.8;">Page non trouvée</p>';
+        echo '<a href="/dashboard" style="color:#60a5fa;margin-top:16px;display:inline-block;">Retour au dashboard</a>';
+        echo '</div></div></body></html>';
+        break;
+}
+
+// ==================
+// Route Handlers
+// ==================
+
+function handleLogin(): void
+{
+    if (!CSRF::verify()) {
+        Session::flash('error', 'Token de sécurité invalide. Veuillez réessayer.');
+        redirect('/login');
     }
 
-    function filtrerMarqueurs(statut = 'tous') {
-        const dateDebut = new Date(document.getElementById('date-debut').value);
-        const dateFin = new Date(document.getElementById('date-fin').value);
+    $siteUrl = trim($_POST['site_url'] ?? '');
+    $consumerKey = trim($_POST['consumer_key'] ?? '');
+    $consumerSecret = trim($_POST['consumer_secret'] ?? '');
 
-        marqueurs.forEach(({ marqueur, commande }) => {
-            const dateCommande = new Date(commande.date);
-            const statutCorrespond = statut === 'tous' || commande.statut === statut;
-            const dateCorrespond = (isNaN(dateDebut) || dateCommande >= dateDebut) && 
-                                   (isNaN(dateFin) || dateCommande <= dateFin);
+    try {
+        Auth::loginWithAppPassword($siteUrl, $consumerKey, $consumerSecret);
+        CSRF::regenerate();
+        Session::flash('success', 'Boutique connectée avec succès !');
+        redirect('/dashboard');
+    } catch (RuntimeException $e) {
+        Session::flash('error', $e->getMessage());
+        redirect('/login');
+    }
+}
 
-            if (statutCorrespond && dateCorrespond) {
-                marqueur.setMap(carte);
-            } else {
-                marqueur.setMap(null);
-            }
-        });
+function handleOAuthStart(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        redirect('/login');
     }
 
-    function initialiserGraphique() {
-        const ctx = document.getElementById('statut-chart').getContext('2d');
-        new Chart(ctx, {
-            type: 'pie',
-            data: {
-                labels: ['Terminé', 'En cours', 'Annulé', 'Autre'],
-                datasets: [{
-                    data: [
-                        statistiques.termine,
-                        statistiques.en_cours,
-                        statistiques.annule,
-                        statistiques.autre
-                    ],
-                    backgroundColor: ['#4CAF50', '#FFA500', '#F44336', '#9E9E9E']
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: {
-                    legend: { position: 'bottom' }
-                }
-            }
-        });
-
-        document.getElementById('total-ventes').textContent = statistiques.total_ventes.toLocaleString('fr-FR');
+    if (!CSRF::verify()) {
+        Session::flash('error', 'Token de sécurité invalide.');
+        redirect('/login');
     }
 
-    document.getElementById('filtre-tous').addEventListener('click', () => filtrerMarqueurs('tous'));
-    document.getElementById('filtre-termine').addEventListener('click', () => filtrerMarqueurs('completed'));
-    document.getElementById('filtre-en-cours').addEventListener('click', () => filtrerMarqueurs('processing'));
-    document.getElementById('filtre-annule').addEventListener('click', () => filtrerMarqueurs('cancelled'));
-    document.getElementById('appliquer-filtres').addEventListener('click', () => filtrerMarqueurs('tous'));
+    $siteUrl = trim($_POST['site_url'] ?? '');
+    $callbackUrl = APP_URL . '/oauth/callback';
 
-    document.addEventListener('DOMContentLoaded', () => {
-        initialiserCarte();
-        initialiserGraphique();
-    });
-    </script>
-</body>
-</html>
+    try {
+        $authUrl = Auth::getOAuthUrl($siteUrl, $callbackUrl);
+        redirect($authUrl);
+    } catch (RuntimeException $e) {
+        Session::flash('error', $e->getMessage());
+        redirect('/login');
+    }
+}
+
+function handleOAuthCallback(): void
+{
+    try {
+        $params = array_merge($_GET, $_POST);
+        Auth::handleOAuthCallback($params);
+        CSRF::regenerate();
+        Session::flash('success', 'Boutique connectée via OAuth !');
+        redirect('/dashboard');
+    } catch (RuntimeException $e) {
+        Session::flash('error', $e->getMessage());
+        redirect('/login');
+    }
+}
+
+function handleStoreAdd(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !CSRF::verify()) {
+        redirect('/stores');
+    }
+
+    $siteUrl = trim($_POST['site_url'] ?? '');
+    $consumerKey = trim($_POST['consumer_key'] ?? '');
+    $consumerSecret = trim($_POST['consumer_secret'] ?? '');
+
+    try {
+        Auth::loginWithAppPassword($siteUrl, $consumerKey, $consumerSecret);
+        Session::flash('success', 'Boutique ajoutée avec succès !');
+    } catch (RuntimeException $e) {
+        Session::flash('error', $e->getMessage());
+    }
+
+    redirect('/stores');
+}
+
+function handleStoreSwitch(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!CSRF::verify()) {
+            redirect('/stores');
+        }
+        $storeId = $_POST['store_id'] ?? '';
+    } else {
+        $storeId = $_GET['id'] ?? '';
+    }
+
+    if ($storeId && Store::get($storeId)) {
+        Store::setActive($storeId);
+        Session::flash('success', 'Boutique activée.');
+    } else {
+        Session::flash('error', 'Boutique introuvable.');
+    }
+
+    redirect('/stores');
+}
+
+function handleStoreDelete(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !CSRF::verify()) {
+        redirect('/stores');
+    }
+
+    $storeId = $_POST['store_id'] ?? '';
+    if ($storeId) {
+        Store::delete($storeId);
+        Session::flash('success', 'Boutique supprimée.');
+
+        // If no stores left, logout
+        if (Store::count() === 0) {
+            Auth::logout();
+            redirect('/login');
+            return;
+        }
+    }
+
+    redirect('/stores');
+}
+
+// ==================
+// API Handlers
+// ==================
+
+function handleApiOrders(): void
+{
+    try {
+        $woo = WooCommerce::fromSession();
+        if (!$woo) {
+            jsonResponse(['success' => false, 'error' => 'Boutique non connectée'], 401);
+        }
+
+        $filters = [];
+        if (!empty($_GET['after'])) {
+            $filters['after'] = $_GET['after'] . 'T00:00:00';
+        }
+        if (!empty($_GET['before'])) {
+            $filters['before'] = $_GET['before'] . 'T23:59:59';
+        }
+        if (!empty($_GET['status'])) {
+            $filters['status'] = $_GET['status'];
+        }
+
+        $orders = $woo->getOrders($filters);
+        $data = $woo->processOrdersForMap($orders);
+
+        jsonResponse(['success' => true, 'data' => $data]);
+    } catch (RuntimeException $e) {
+        jsonResponse(['success' => false, 'error' => $e->getMessage()], 500);
+    }
+}
+
+function handleApiGeocode(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        jsonResponse(['success' => false, 'error' => 'POST required'], 405);
+    }
+
+    $input = json_decode(file_get_contents('php://input'), true);
+    $addresses = $input['addresses'] ?? [];
+    $cities = $input['cities'] ?? [];
+
+    if (empty($addresses)) {
+        jsonResponse(['success' => true, 'coordinates' => []]);
+    }
+
+    $geocoder = new Geocoder();
+    $coordinates = [];
+
+    foreach ($addresses as $address) {
+        $city = $cities[$address] ?? '';
+        $result = $geocoder->smartGeocode($address, $city);
+        $coordinates[$address] = $result;
+    }
+
+    jsonResponse(['success' => true, 'coordinates' => $coordinates]);
+}
+
+function handleApiNotifications(): void
+{
+    try {
+        $woo = WooCommerce::fromSession();
+        if (!$woo) {
+            jsonResponse(['success' => false, 'error' => 'Non connecté'], 401);
+        }
+
+        $recent = $woo->getRecentOrders(60);
+
+        $orders = array_map(function ($order) {
+            return [
+                'id' => $order['id'] ?? 0,
+                'customer' => trim(($order['billing']['first_name'] ?? '') . ' ' . ($order['billing']['last_name'] ?? '')),
+                'total' => (float) ($order['total'] ?? 0),
+                'status' => $order['status'] ?? '',
+                'date' => $order['date_created'] ?? '',
+            ];
+        }, $recent);
+
+        jsonResponse(['success' => true, 'orders' => $orders]);
+    } catch (RuntimeException $e) {
+        jsonResponse(['success' => true, 'orders' => []]);
+    }
+}
+
+function handleApiClearCache(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        jsonResponse(['success' => false], 405);
+    }
+
+    $cache = new Cache('cache');
+    $cache->clear();
+    jsonResponse(['success' => true]);
+}
+
+// ==================
+// Export Handlers
+// ==================
+
+function handleExportCSV(): void
+{
+    try {
+        $woo = WooCommerce::fromSession();
+        if (!$woo) {
+            redirect('/login');
+        }
+
+        $orders = $woo->getOrders();
+        $data = $woo->processOrdersForMap($orders);
+
+        $storeName = '';
+        $store = Store::getActive();
+        if ($store) {
+            $storeName = preg_replace('/[^a-zA-Z0-9_-]/', '', $store['name']);
+        }
+
+        $filename = 'woomap-' . ($storeName ?: 'export') . '-' . date('Y-m-d') . '.csv';
+        Export::toCSV($data['orders'], $filename);
+        exit;
+    } catch (RuntimeException $e) {
+        Session::flash('error', 'Erreur d\'export : ' . $e->getMessage());
+        redirect('/dashboard');
+    }
+}
+
+function handleExportPrint(): void
+{
+    try {
+        $woo = WooCommerce::fromSession();
+        if (!$woo) {
+            redirect('/login');
+        }
+
+        $orders = $woo->getOrders();
+        $data = $woo->processOrdersForMap($orders);
+
+        echo Export::toPrintHTML($data['orders'], $data['stats']);
+        exit;
+    } catch (RuntimeException $e) {
+        Session::flash('error', 'Erreur d\'export : ' . $e->getMessage());
+        redirect('/dashboard');
+    }
+}
+
+// ==================
+// Helper Functions
+// ==================
+
+/**
+ * Render a template inside the layout.
+ */
+function renderPage(string $template, string $title, string $currentPage): void
+{
+    $pageTitle = $title;
+    ob_start();
+    require TEMPLATE_DIR . '/' . $template . '.php';
+    $content = ob_get_clean();
+    require TEMPLATE_DIR . '/layout.php';
+}
+
+/**
+ * Render a standalone template (no layout).
+ */
+function renderTemplate(string $template): void
+{
+    require TEMPLATE_DIR . '/' . $template . '.php';
+}
+
+/**
+ * Send a JSON response.
+ */
+function jsonResponse(array $data, int $code = 200): void
+{
+    http_response_code($code);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * Redirect to a URL.
+ */
+function redirect(string $url): void
+{
+    header('Location: ' . $url);
+    exit;
+}
+
+/**
+ * Check if the request is AJAX.
+ */
+function isAjax(): bool
+{
+    return !empty($_SERVER['HTTP_X_REQUESTED_WITH'])
+        && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+}
